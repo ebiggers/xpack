@@ -1,0 +1,16 @@
+*.a
+*.dll
+*.exe
+*.exp
+*.lib
+*.o
+*.obj
+*.so
+/.lib-cflags
+/.prog-cflags
+/programs/config.h
+/benchmark
+/xpack
+/xunpack
+tags
+cscope*

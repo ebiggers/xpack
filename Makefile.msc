@@ -1,0 +1,54 @@
+#
+# Makefile for the Microsoft toolchain
+#
+# Usage:
+#	nmake /f Makefile.msc
+#
+
+CC = cl
+LD = link
+AR = lib
+CFLAGS = /MD /O2 -I. -Icommon
+LDFLAGS =
+
+STATICLIB = libxpackstatic.lib
+SHAREDLIB = libxpack.dll
+IMPLIB    = libxpack.lib
+
+LIB_OBJ = lib/x86_cpu_features.obj	\
+	  lib/xpack_compress.obj	\
+	  lib/xpack_decompress.obj	\
+	  lib/xpack_common.obj
+
+PROG_COMMON_OBJ = programs/prog_util.obj \
+		  programs/tgetopt.obj \
+		  $(STATICLIB)
+
+PROG_CFLAGS = $(CFLAGS) -Iprograms
+
+PROGRAMS = benchmark.exe xpack.exe xunpack.exe
+
+all: $(STATICLIB) $(SHAREDLIB) $(IMPLIB) $(PROGRAMS)
+
+.c.obj:
+	$(CC) -c /Fo$@ $(CFLAGS) $**
+
+$(STATICLIB): $(LIB_OBJ)
+	$(AR) $(ARFLAGS) -out:$@ $(LIB_OBJ)
+
+$(SHAREDLIB): $(LIB_OBJ)
+	$(LD) $(LDFLAGS) -out:$@ -dll -implib:$(IMPLIB) $(LIB_OBJ)
+
+$(IMPLIB): $(SHAREDLIB)
+
+benchmark.exe:programs/benchmark.obj $(PROG_COMMON_OBJ)
+	$(LD) $(LDFLAGS) -out:$@ $**
+
+xpack.exe:programs/xpack.obj $(PROG_COMMON_OBJ)
+	$(LD) $(LDFLAGS) -out:$@ $**
+
+xunpack.exe:xpack.exe
+	copy $** $@
+
+clean:
+	-del *.dll *.exe *.exp *.lib lib\*.obj programs\*.obj 2>nul
