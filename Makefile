@@ -8,8 +8,8 @@
 # TODO: ENABLE_PREPROCESSING option
 #
 
-CC := gcc
-AR := ar
+CC ?= gcc
+AR ?= ar
 
 STATIC_LIB_SUFFIX := .a
 SHARED_LIB_SUFFIX := .so
