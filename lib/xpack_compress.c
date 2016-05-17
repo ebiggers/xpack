@@ -611,7 +611,8 @@ symbol_ostream_add_bits(struct symbol_ostream *os, machine_word_t bits, unsigned
 static forceinline void
 symbol_ostream_flush_bits(struct symbol_ostream *os)
 {
-	machine_word_t bits = os->bitbuf << (WORDBITS - os->bitcount);
+	machine_word_t bits = os->bitbuf <<
+		((WORDBITS - os->bitcount) & (WORDBITS - 1));
 
 	put_unaligned_leword(bits, os->next);
 	os->next -= MIN(os->next - os->begin, os->bitcount >> 3);
