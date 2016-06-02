@@ -130,15 +130,11 @@ typedef size_t machine_word_t;
 /*                          Miscellaneous macros                              */
 /* ========================================================================== */
 
-#define ARRAY_LEN(A)	(sizeof(A) / sizeof((A)[0]))
-#define MIN(a, b)	((a) <= (b) ? (a) : (b))
-#define MAX(a, b)	((a) >= (b) ? (a) : (b))
-
-#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
-#  define STATIC_ASSERT(expr)	_Static_assert((expr), "")
-#else
-#  define STATIC_ASSERT(expr)	((void)sizeof(char[1 - 2 * !(expr)]))
-#endif
+#define ARRAY_LEN(A)		(sizeof(A) / sizeof((A)[0]))
+#define MIN(a, b)		((a) <= (b) ? (a) : (b))
+#define MAX(a, b)		((a) >= (b) ? (a) : (b))
+#define DIV_ROUND_UP(n, d)	(((n) + (d) - 1) / (d))
+#define STATIC_ASSERT(expr)	((void)sizeof(char[1 - 2 * !(expr)]))
 
 /* ========================================================================== */
 /*                           Endianness handling                              */

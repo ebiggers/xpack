@@ -1,22 +1,39 @@
 #
+# Use 'make help' to list available targets.
+#
 # Define V=1 to enable "verbose" mode, showing all executed commands.
 #
-# Define DECOMPRESSION_ONLY=yes to omit all compression code, building a
+# Define DECOMPRESSION_ONLY to omit all compression code, building a
 # decompression-only library.  If doing this, you must also build a specific
 # library target such as 'libxpack.a', as the programs will no longer compile.
 #
 # TODO: ENABLE_PREPROCESSING option
 #
+##############################################################################
 
-CC ?= gcc
-AR ?= ar
+#### Common compiler flags.
+#### Flags given here are not intended to be overridden, but you can add more
+#### by defining CFLAGS in the environment or on the 'make' command line.
+
+cc-option = $(shell if $(CC) $(1) -c -x c /dev/null -o /dev/null \
+	      1>&2 2>/dev/null; then echo $(1); fi)
+
+override CFLAGS :=							\
+	$(CFLAGS) -O2 -fomit-frame-pointer -std=gnu89 -I. -Icommon	\
+	-Wall -Wundef							\
+	$(call cc-option,-Wdeclaration-after-statement)			\
+	$(call cc-option,-Wmissing-prototypes)				\
+	$(call cc-option,-Wstrict-prototypes)				\
+	$(call cc-option,-Wvla)
+
+##############################################################################
 
 STATIC_LIB_SUFFIX := .a
 SHARED_LIB_SUFFIX := .so
 PROG_SUFFIX       :=
 PROG_CFLAGS       :=
-PIC_REQUIRED      := yes
-HARD_LINKS        := yes
+PIC_REQUIRED      := 1
+HARD_LINKS        := 1
 
 # Compiling for Windows with MinGW?
 ifneq ($(findstring -mingw,$(CC)),)
@@ -27,17 +44,9 @@ ifneq ($(findstring -mingw,$(CC)),)
     SHARED_LIB_SUFFIX := .dll
     PROG_SUFFIX       := .exe
     PROG_CFLAGS       := -static -municode
-    PIC_REQUIRED      := no
-    HARD_LINKS        := no
+    PIC_REQUIRED      :=
+    HARD_LINKS        :=
 endif
-
-##############################################################################
-
-#### Common compiler flags; not intended to be overridden
-
-override CFLAGS += -O2 -fomit-frame-pointer -std=gnu89 -I. -Icommon	\
-		-Wall -Wundef -Wdeclaration-after-statement		\
-		-Wmissing-prototypes -Wstrict-prototypes
 
 ##############################################################################
 
@@ -66,13 +75,13 @@ SHARED_LIB := libxpack$(SHARED_LIB_SUFFIX)
 
 LIB_CFLAGS += $(CFLAGS) -fvisibility=hidden -D_ANSI_SOURCE
 
-DECOMPRESSION_ONLY := no
-ifeq ($(DECOMPRESSION_ONLY),yes)
+DECOMPRESSION_ONLY :=
+ifdef DECOMPRESSION_ONLY
     LIB_CFLAGS += -DDECOMPRESSION_ONLY=1
 endif
 
-ENABLE_PREPROCESSING := no
-ifeq ($(ENABLE_PREPROCESSING),yes)
+ENABLE_PREPROCESSING :=
+ifdef ENABLE_PREPROCESSING
     LIB_CFLAGS += -DENABLE_PREPROCESSING=1
 endif
 
@@ -85,7 +94,7 @@ LIB_SRC := lib/x86_cpu_features.c	\
 
 LIB_OBJ := $(LIB_SRC:.c=.o)
 LIB_PIC_OBJ := $(LIB_SRC:.c=.pic.o)
-ifeq ($(PIC_REQUIRED),yes)
+ifdef PIC_REQUIRED
     SHLIB_OBJ := $(LIB_PIC_OBJ)
 else
     SHLIB_OBJ := $(LIB_OBJ)
@@ -156,7 +165,7 @@ xpack$(PROG_SUFFIX):programs/xpack.o $(PROG_COMMON_OBJ) $(STATIC_LIB)
 
 ALL_TARGETS += xpack$(PROG_SUFFIX)
 
-ifeq ($(HARD_LINKS),yes)
+ifdef HARD_LINKS
 # Hard link xunpack to xpack
 xunpack$(PROG_SUFFIX):xpack$(PROG_SUFFIX)
 	$(QUIET_LN) ln -f $< $@
