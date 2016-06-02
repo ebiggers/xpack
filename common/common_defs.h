@@ -133,6 +133,8 @@ typedef size_t machine_word_t;
 #define ARRAY_LEN(A)		(sizeof(A) / sizeof((A)[0]))
 #define MIN(a, b)		((a) <= (b) ? (a) : (b))
 #define MAX(a, b)		((a) >= (b) ? (a) : (b))
+#define MAX3(a, b, c)		MAX((a), MAX((b), (c)))
+#define MAX4(a, b, c, d)	MAX((a), MAX3((b), (c), (d)))
 #define DIV_ROUND_UP(n, d)	(((n) + (d) - 1) / (d))
 #define STATIC_ASSERT(expr)	((void)sizeof(char[1 - 2 * !(expr)]))
 

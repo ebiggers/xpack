@@ -39,12 +39,28 @@
 #include "xpack_common.h"
 
 /*
- * The minimum and maximum block lengths, in bytes of source data, which the
- * parsing algorithms may choose.  Caveat: due to implementation details, the
- * actual maximum will be slightly higher than the number defined below.
+ * The compressor always chooses a block of at least MIN_BLOCK_LENGTH bytes,
+ * except if the last block has to be shorter.
  */
 #define MIN_BLOCK_LENGTH	10000
-#define MAX_BLOCK_LENGTH	300000
+
+/*
+ * The compressor attempts to end blocks after SOFT_MAX_BLOCK_LENGTH bytes, but
+ * the final size might be larger due to matches extending beyond the end of the
+ * block.  Specifically:
+ *
+ *  - The greedy parser may choose an arbitrarily long match starting at the
+ *    SOFT_MAX_BLOCK_LENGTH'th byte.
+ *
+ *  - The lazy parser may choose a sequence of literals starting at the
+ *    SOFT_MAX_BLOCK_LENGTH'th byte when it sees a sequence of increasing good
+ *    matches.  The final match may be of arbitrary length.  The length of the
+ *    literal sequence is approximately limited by the "nice match length"
+ *    parameter.  The actual limit is related to match scores and may be
+ *    slightly different.  We overestimate the limit as EXTRA_LITERAL_SPACE.
+ */
+#define SOFT_MAX_BLOCK_LENGTH	300000
+#define EXTRA_LITERAL_SPACE	512
 
 /* Holds the symbols and extra offset bits needed to represent a match */
 struct match {
@@ -137,9 +153,17 @@ struct xpack_compressor {
 	u32 num_matches;
 	u32 num_extra_bytes;
 
-	u8 literals[MAX_BLOCK_LENGTH];
-	struct match matches[MAX_BLOCK_LENGTH];
-	u8 extra_bytes[MAX_BLOCK_LENGTH];
+	u8 literals[SOFT_MAX_BLOCK_LENGTH + EXTRA_LITERAL_SPACE];
+	struct match matches[DIV_ROUND_UP(SOFT_MAX_BLOCK_LENGTH, MIN_MATCH_LEN) + 1];
+	u8 extra_bytes[6 + /* extra for actual block length > soft max */
+		MAX4(1 * DIV_ROUND_UP(SOFT_MAX_BLOCK_LENGTH,
+				      MIN_MATCH_LEN + LENGTH_ALPHABET_SIZE - 1),
+		     3 * DIV_ROUND_UP(SOFT_MAX_BLOCK_LENGTH,
+				      MIN_MATCH_LEN + LENGTH_ALPHABET_SIZE - 1 + 0xFF),
+		     1 * DIV_ROUND_UP(SOFT_MAX_BLOCK_LENGTH,
+				      LITRUNLEN_ALPHABET_SIZE - 1),
+		     3 * DIV_ROUND_UP(SOFT_MAX_BLOCK_LENGTH,
+				      LITRUNLEN_ALPHABET_SIZE - 1 + 0xFF))];
 
 	/* Hash chains matchfinder (MUST BE LAST!!!) */
 	struct hc_matchfinder hc_mf;
@@ -1290,7 +1314,7 @@ compress_greedy(struct xpack_compressor *c, void *out, size_t out_nbytes_avail)
 
 		const u8 * const in_block_begin = in_next;
 		const u8 * const in_max_block_end =
-			in_next + MIN(MAX_BLOCK_LENGTH, in_end - in_next);
+			in_next + MIN(SOFT_MAX_BLOCK_LENGTH, in_end - in_next);
 		u32 length;
 		u32 offset;
 		size_t nbytes;
@@ -1517,7 +1541,7 @@ compress_lazy(struct xpack_compressor *c, void *out, size_t out_nbytes_avail)
 
 		const u8 * const in_block_begin = in_next;
 		const u8 * const in_max_block_end =
-			in_next + MIN(MAX_BLOCK_LENGTH, in_end - in_next);
+			in_next + MIN(SOFT_MAX_BLOCK_LENGTH, in_end - in_next);
 		u32 cur_len;
 		u32 cur_offset;
 		u32 cur_offset_data;
@@ -1802,6 +1826,7 @@ xpack_alloc_compressor(size_t max_buffer_size, int compression_level)
 		c->impl = compress_lazy;
 		c->max_search_depth = 256;
 		c->nice_match_length = 384;
+		STATIC_ASSERT(EXTRA_LITERAL_SPACE >= 384 * 4 / 3);
 		break;
 	default:
 		goto err2;
