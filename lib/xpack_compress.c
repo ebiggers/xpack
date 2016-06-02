@@ -38,7 +38,13 @@
 #include "lz_extend.h"
 #include "xpack_common.h"
 
-#define DIV_BLOCK_SIZE	65536
+/*
+ * The minimum and maximum block lengths, in bytes of source data, which the
+ * parsing algorithms may choose.  Caveat: due to implementation details, the
+ * actual maximum will be slightly higher than the number defined below.
+ */
+#define MIN_BLOCK_LENGTH	10000
+#define MAX_BLOCK_LENGTH	300000
 
 /* Holds the symbols and extra offset bits needed to represent a match */
 struct match {
@@ -99,6 +105,17 @@ struct codes {
 	};
 };
 
+/* Block split statistics.  See "Block splitting algorithm" below. */
+#define NUM_LITERAL_OBSERVATION_TYPES 8
+#define NUM_MATCH_OBSERVATION_TYPES 2
+#define NUM_OBSERVATION_TYPES (NUM_LITERAL_OBSERVATION_TYPES + NUM_MATCH_OBSERVATION_TYPES)
+struct block_split_stats {
+	u32 new_observations[NUM_OBSERVATION_TYPES];
+	u32 observations[NUM_OBSERVATION_TYPES];
+	u32 num_new_observations;
+	u32 num_observations;
+};
+
 /* The main compressor structure */
 struct xpack_compressor {
 
@@ -110,6 +127,7 @@ struct xpack_compressor {
 	size_t (*impl)(struct xpack_compressor *, void *, size_t);
 
 	struct freqs freqs;
+	struct block_split_stats split_stats;
 	struct codes codes;
 
 	unsigned cumul_state_counts[MAX_ALPHABET_SIZE];
@@ -119,10 +137,9 @@ struct xpack_compressor {
 	u32 num_matches;
 	u32 num_extra_bytes;
 
-	u8 literals[DIV_BLOCK_SIZE];
-	struct match matches[DIV_BLOCK_SIZE];
-	u8 extra_bytes[DIV_BLOCK_SIZE];
-
+	u8 literals[MAX_BLOCK_LENGTH];
+	struct match matches[MAX_BLOCK_LENGTH];
+	u8 extra_bytes[MAX_BLOCK_LENGTH];
 
 	/* Hash chains matchfinder (MUST BE LAST!!!) */
 	struct hc_matchfinder hc_mf;
@@ -895,6 +912,125 @@ choose_block_type(struct xpack_compressor *c)
 		return BLOCKTYPE_VERBATIM;
 }
 
+/******************************************************************************/
+
+/*
+ * Block splitting algorithm.  The problem is to decide when it is worthwhile to
+ * start a new block with new entropy codes.  There is a theoretically optimal
+ * solution: recursively consider every possible block split, considering the
+ * exact cost of each block, and choose the minimum cost approach.  But this is
+ * far too slow.  Instead, as an approximation, we can count symbols and after
+ * every N symbols, compare the expected distribution of symbols based on the
+ * previous data with the actual distribution.  If they differ "by enough", then
+ * start a new block.
+ *
+ * As an optimization and heuristic, we don't distinguish between every symbol
+ * but rather we combine many symbols into a single "observation type".  For
+ * literals we only look at the high bits and low bits, and for matches we only
+ * look at whether the match is long or not.  The assumption is that for typical
+ * "real" data, places that are good block boundaries will tend to be noticable
+ * based only on changes in these aggregate frequencies, without looking for
+ * subtle differences in individual symbols.  For example, a change from ASCII
+ * bytes to non-ASCII bytes, or from few matches (generally less compressible)
+ * to many matches (generally more compressible), would be easily noticed based
+ * on the aggregates.
+ *
+ * For determining whether the frequency distributions are "different enough" to
+ * start a new block, the simply heuristic of splitting when the sum of absolute
+ * differences exceeds a constant seems to be good enough.  We also add a number
+ * proportional to the block size so that the algorithm is more likely to end
+ * large blocks than small blocks.  This reflects the general expectation that
+ * it will become increasingly beneficial to start a new block as the current
+ * blocks grows larger.
+ *
+ * Finally, for an approximation, it is not strictly necessary that the exact
+ * symbols being used are considered.  With "near-optimal parsing", for example,
+ * the actual symbols that will be used are unknown until after the block
+ * boundary is chosen and the block has been optimized.  Since the final choices
+ * cannot be used, we can use preliminary "greedy" choices instead.
+ */
+
+/* Initialize the block split statistics when starting a new block. */
+static void
+init_block_split_stats(struct block_split_stats *stats)
+{
+	int i;
+
+	for (i = 0; i < NUM_OBSERVATION_TYPES; i++) {
+		stats->new_observations[i] = 0;
+		stats->observations[i] = 0;
+	}
+	stats->num_new_observations = 0;
+	stats->num_observations = 0;
+}
+
+/* Literal observation.  Heuristic: use the top 2 bits and low 1 bits of the
+ * literal, for 8 possible literal observation types.  */
+static forceinline void
+observe_literal(struct block_split_stats *stats, u8 lit)
+{
+	stats->new_observations[((lit >> 5) & 0x6) | (lit & 1)]++;
+	stats->num_new_observations++;
+}
+
+/* Match observation.  Heuristic: use one observation type for "short match" and
+ * one observation type for "long match".  */
+static forceinline void
+observe_match(struct block_split_stats *stats, unsigned length)
+{
+	stats->new_observations[NUM_LITERAL_OBSERVATION_TYPES + (length >= 9)]++;
+	stats->num_new_observations++;
+}
+
+static bool
+do_end_block_check(struct block_split_stats *stats, u32 block_size)
+{
+	int i;
+
+	if (stats->num_observations > 0) {
+
+		/* Note: to avoid slow divisions, we do not divide by
+		 * 'num_observations', but rather do all math with the numbers
+		 * multiplied by 'num_observations'.  */
+		u32 total_delta = 0;
+		for (i = 0; i < NUM_OBSERVATION_TYPES; i++) {
+			u32 expected = stats->observations[i] * stats->num_new_observations;
+			u32 actual = stats->new_observations[i] * stats->num_observations;
+			u32 delta = (actual > expected) ? actual - expected :
+							  expected - actual;
+			total_delta += delta;
+		}
+
+		/* Ready to end the block? */
+		if (total_delta + (block_size >> 12) * stats->num_observations >=
+		    200 * stats->num_observations)
+			return true;
+	}
+
+	for (i = 0; i < NUM_OBSERVATION_TYPES; i++) {
+		stats->num_observations += stats->new_observations[i];
+		stats->observations[i] += stats->new_observations[i];
+		stats->new_observations[i] = 0;
+	}
+	stats->num_new_observations = 0;
+	return false;
+}
+
+static forceinline bool
+should_end_block(struct block_split_stats *stats,
+		 const u8 *in_block_begin, const u8 *in_next, const u8 *in_end)
+{
+	/* Ready to check block split statistics? */
+	if (stats->num_new_observations < 512 ||
+	    in_next - in_block_begin < MIN_BLOCK_LENGTH ||
+	    in_end - in_next < 16384)
+		return false;
+
+	return do_end_block_check(stats, in_next - in_block_begin);
+}
+
+/******************************************************************************/
+
 static void
 begin_block(struct xpack_compressor *c)
 {
@@ -902,6 +1038,7 @@ begin_block(struct xpack_compressor *c)
 	c->num_literals = 0;
 	c->num_matches = 0;
 	c->num_extra_bytes = 0;
+	init_block_split_stats(&c->split_stats);
 }
 
 static void
@@ -1152,8 +1289,8 @@ compress_greedy(struct xpack_compressor *c, void *out, size_t out_nbytes_avail)
 		/* Starting a new block */
 
 		const u8 * const in_block_begin = in_next;
-		const u8 * const in_block_end =
-			in_next + MIN(DIV_BLOCK_SIZE, in_end - in_next);
+		const u8 * const in_max_block_end =
+			in_next + MIN(MAX_BLOCK_LENGTH, in_end - in_next);
 		u32 length;
 		u32 offset;
 		size_t nbytes;
@@ -1188,13 +1325,17 @@ compress_greedy(struct xpack_compressor *c, void *out, size_t out_nbytes_avail)
 			if (length < 3 || (length == 3 && offset >= 4096)) {
 		#endif
 				/* Literal */
-				record_literal(c, *in_next++);
+				observe_literal(&c->split_stats, *in_next);
+				record_literal(c, *in_next);
+				in_next++;
 				litrunlen++;
 			} else {
 				/* Match */
 				struct match *match = &c->matches[c->num_matches++];
 
 				STATIC_ASSERT(NUM_REPS >= 1 && NUM_REPS <= 4);
+
+				observe_match(&c->split_stats, length);
 
 				if (offset == recent_offsets[0]) {
 					record_repeat_offset(c, match, 0);
@@ -1241,7 +1382,8 @@ compress_greedy(struct xpack_compressor *c, void *out, size_t out_nbytes_avail)
 									next_hashes);
 				litrunlen = 0;
 			}
-		} while (in_next < in_block_end);
+		} while (in_next < in_max_block_end &&
+			 !should_end_block(&c->split_stats, in_block_begin, in_next, in_end));
 
 		nbytes = write_block(c, out_next, out_end - out_next,
 				     in_next - in_block_begin, litrunlen,
@@ -1374,8 +1516,8 @@ compress_lazy(struct xpack_compressor *c, void *out, size_t out_nbytes_avail)
 		/* Starting a new block */
 
 		const u8 * const in_block_begin = in_next;
-		const u8 * const in_block_end =
-			in_next + MIN(DIV_BLOCK_SIZE, in_end - in_next);
+		const u8 * const in_max_block_end =
+			in_next + MIN(MAX_BLOCK_LENGTH, in_end - in_next);
 		u32 cur_len;
 		u32 cur_offset;
 		u32 cur_offset_data;
@@ -1425,10 +1567,14 @@ compress_lazy(struct xpack_compressor *c, void *out, size_t out_nbytes_avail)
 				 * found was a distant length 3 match.  Output a
 				 * literal.
 				 */
-				record_literal(c, *in_next++);
+				observe_literal(&c->split_stats, *in_next);
+				record_literal(c, *in_next);
+				in_next++;
 				litrunlen++;
 				continue;
 			}
+
+			observe_match(&c->split_stats, cur_len);
 
 			if (cur_offset == recent_offsets[0]) {
 				in_next++;
@@ -1577,7 +1723,8 @@ compress_lazy(struct xpack_compressor *c, void *out, size_t out_nbytes_avail)
 								in_end - in_begin,
 								skip_len,
 								next_hashes);
-		} while (in_next < in_block_end);
+		} while (in_next < in_max_block_end &&
+			 !should_end_block(&c->split_stats, in_block_begin, in_next, in_end));
 
 		nbytes = write_block(c, out_next, out_end - out_next,
 				     in_next - in_block_begin, litrunlen,
